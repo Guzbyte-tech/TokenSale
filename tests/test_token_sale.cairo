@@ -10,17 +10,16 @@ use token_sale::interfaces::ierc20::{IERC20Dispatcher, IERC20DispatcherTrait};
 use token_sale::mocks::mock_erc20::{ITestERC20Dispatcher, ITestERC20DispatcherTrait};
 
 
-fn deploy_contract(name: ByteArray) -> (ITokenSaleDispatcher, ContractAddress, ContractAddress, ContractAddress) {
+fn deploy_contract(name: ByteArray, payment_token_address: ContractAddress) -> (ITokenSaleDispatcher, ContractAddress, ContractAddress, ContractAddress) {
     let contract = declare(name).unwrap().contract_class();
     let owner: ContractAddress = contract_address_const::<'owner'>();
-    let accepted_payment_token = contract_address_const::<'strk'>();
-    let constructor_calldata = array![owner.into(), accepted_payment_token.into()];
+    let constructor_calldata = array![owner.into(), payment_token_address.into()];
 
     let (contract_address, _) = contract.deploy(@constructor_calldata).unwrap();
 
     let token_sale = ITokenSaleDispatcher{contract_address};
 
-    (token_sale, contract_address, owner, accepted_payment_token)
+    (token_sale, contract_address, owner, payment_token_address)
 }
 
 fn deploy_mock_erc20() -> (IERC20Dispatcher, ITestERC20Dispatcher, ContractAddress) {
@@ -32,19 +31,21 @@ fn deploy_mock_erc20() -> (IERC20Dispatcher, ITestERC20Dispatcher, ContractAddre
     (token, test_token, contract_address)
 }
 
-
-
 #[test]
 fn test_constructor () {
-    let (token_sale, _, owner, accepted_payment_token) = deploy_contract("TokenSale");
+    let (payment_token, _, payment_token_address) = deploy_mock_erc20();
+    let (token_sale, _, owner, accepted_payment_token) = deploy_contract("TokenSale", payment_token_address);
     assert!(token_sale.get_owner() == owner, "Owner not set correctly");
     assert!(token_sale.get_accepted_payment_token() == accepted_payment_token, "Accepted payment token not set correctly");
 }
 
 #[test]
 fn test_check_available_token() {
+    // Deploy payment token first
+    let (payment_token, _, payment_token_address) = deploy_mock_erc20();
+    
     // Deploy TokenSale contract
-    let (token_sale, token_sale_contract_address, owner, _) = deploy_contract("TokenSale");
+    let (token_sale, token_sale_contract_address, owner, _) = deploy_contract("TokenSale", payment_token_address);
 
     let (token, test_token, token_address) = deploy_mock_erc20();
 
@@ -66,8 +67,28 @@ fn test_check_available_token() {
 }
 
 #[test]
+#[should_panic(expected: ('Unauthorized',))]
+fn test_deposit_token_unauthorized() {
+
+    let (_, test_token, token_address) = deploy_mock_erc20();
+
+    let (token_sale, contract_address, owner, _) = deploy_contract("TokenSale", token_address);
+    
+    test_token.mint(owner, 1000_u256);
+    
+    let unauthorized_user = contract_address_const::<'unauthorized'>();
+    
+    start_cheat_caller_address(contract_address, unauthorized_user);
+    
+    token_sale.deposit_token(token_address, 100_u256, 10_u256);
+}
+
+#[test]
 fn test_deposit() {
-    let (token_sale, token_sale_contract_address, owner, _) = deploy_contract("TokenSale");
+    // Deploy payment token first
+    let (payment_token, _, payment_token_address) = deploy_mock_erc20();
+    
+    let (token_sale, token_sale_contract_address, owner, _) = deploy_contract("TokenSale", payment_token_address);
 
     let (token, test_token, token_address) = deploy_mock_erc20();
 
@@ -107,21 +128,22 @@ fn test_deposit() {
 
 #[test]
 fn test_buy_token() {
-
-    let (token_sale, contract_address, owner, _) = deploy_contract("TokenSale");
+    // Deploy payment token first
+    let (payment_token, payment_test_token, payment_token_address) = deploy_mock_erc20();
+    
+    let (token_sale, contract_address, owner, _) = deploy_contract("TokenSale", payment_token_address);
     
     let (sell_token, sell_test_token, sell_token_address) = deploy_mock_erc20();
-    let (payment_token, payment_test_token, payment_token_address) = deploy_mock_erc20();
     
     let buyer: ContractAddress = contract_address_const::<'buyer'>();
     let token_amount = 100_u256;
     let token_price = 50_u256;
+    let total_payment = token_price * token_amount;
     
     // Mint tokens to owner and buyer
     sell_test_token.mint(owner, 1000_u256);
-    payment_test_token.mint(buyer, token_price);
+    payment_test_token.mint(buyer, total_payment);
     
-    // Owner approves and deposits tokens for sale
     start_cheat_caller_address(sell_token_address, owner);
     sell_token.approve(contract_address, token_amount);
     stop_cheat_caller_address(sell_token_address);
@@ -130,9 +152,8 @@ fn test_buy_token() {
     token_sale.deposit_token(sell_token_address, token_amount, token_price);
     stop_cheat_caller_address(contract_address);
     
-    // Buyer approves payment
     start_cheat_caller_address(payment_token_address, buyer);
-    payment_token.approve(contract_address, token_price);
+    payment_token.approve(contract_address, total_payment);
     stop_cheat_caller_address(payment_token_address);
     
     // Buyer purchases tokens
@@ -140,10 +161,9 @@ fn test_buy_token() {
     token_sale.buy_token(sell_token_address, token_amount);
     stop_cheat_caller_address(contract_address);
     
-    // // Verify buyer received tokens
-    // assert!(sell_token.balance_of(buyer) == token_amount, "Buyer should have received tokens");
+    // Verify buyer received tokens
+    assert!(sell_token.balance_of(buyer) == token_amount, "Buyer should have received tokens");
     
-    // // Verify contract received payment
-    // assert!(payment_token.balance_of(contract_address) == token_price, "Contract should have received payment");
-
+    // Verify contract received payment
+    assert!(payment_token.balance_of(contract_address) == total_payment, "Contract should have received payment");
 }
